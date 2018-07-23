@@ -21,22 +21,29 @@ if not os.path.exists(coco_obj_save_path):
     os.makedirs(coco_obj_save_path)
 
 # Dataset Setting
-coco_img_path = '/home/cl/Dataset/COCO/'
-coco_anno_path = '/home/cl/Dataset/COCO/annotations'
+# coco_img_path = '/home/cl/Dataset/COCO/'
+# coco_anno_path = '/home/cl/Dataset/COCO/annotations'
+coco_img_path = '../data/coco/'
+coco_anno_path = '../data/coco/annotations'
+coco_bbox_path = '../data/coco_objs/'
 
 # Caffe Setting
-gpu_id = 1
-caffe_proto = '../models/vg/ResNet-101/faster_rcnn_end2end_final/test.prototxt'
-caffe_model = '../data/faster_rcnn_models/resnet101_faster_rcnn_final_iter_320000.caffemodel'
+gpu_id = 0
+caffe_proto = '../models/vg/ResNet-101/faster_rcnn_end2end_final/test_gt.prototxt'
+# caffe_model = '../data/faster_rcnn_models/resnet101_faster_rcnn_final_iter_320000.caffemodel'
+caffe_model = '../data/imagenet_models/ResNet-101-model.caffemodel'
 cfg_path = '../experiments/cfgs/faster_rcnn_end2end_resnet.yml'
 cfg_from_file(cfg_path)
+
+cfg.TEST.HAS_RPN = False
 # cfg.TEST.HAS_RPN True means no extra bounding box, False means with extra bounding box input
 
 # Faster-RCNN Setting
 PIXEL_MEANS = np.array([[[102.9801, 115.9465, 122.7717]]])
 TEST_SCALES = [600]
 MAX_SIZE = 1000
-DEDUP_BOXES = 0.0625
+# DEDUP_BOXES = 0.0625
+DEDUP_BOXES = 0 # Keep all the 36 bounding box
 CONF_THRESH = 0.2
 MIN_BOXES = 36
 MAX_BOXES = 36
@@ -45,6 +52,8 @@ coco_train_anno_path = os.path.join(coco_anno_path, 'captions_train2014.json')
 coco_val_anno_path = os.path.join(coco_anno_path, 'captions_val2014.json')
 coco_train_img_path = os.path.join(coco_img_path, 'train2014')
 coco_val_img_path = os.path.join(coco_img_path, 'val2014')
+coco_train_bbox_path = os.path.join(coco_bbox_path, 'train_obj.pkl')
+coco_val_bbox_path = os.path.join(coco_bbox_path, 'val_obj.pkl')
 
 def assert_exist_path(path):
     assert os.path.exists(path)
@@ -56,6 +65,8 @@ assert_exist_path(coco_train_anno_path)
 assert_exist_path(coco_val_anno_path)
 assert_exist_path(coco_train_img_path)
 assert_exist_path(coco_val_img_path)
+assert_exist_path(coco_train_bbox_path)
+assert_exist_path(coco_val_bbox_path)
 
 def filter_image_info(split_name):
     split = []
@@ -285,19 +296,25 @@ caffe.set_device(gpu_id)
 caffe_net = caffe.Net(caffe_proto, caffe.TEST, weights=caffe_model)
 
 # for split_name in ['train', 'val']:
-for split_name in ['train']:
-# for split_name in ['val']:
+# for split_name in ['train']:
+for split_name in ['val']:
     split_img_info = eval(split_name + '_img_info')
+
     split_imgid2idx = {}
-    split_feat_file = h5py.File(eval(split_name + '_feat_path'), 'w')
+    split_h5_file = h5py.File(eval(split_name + '_feat_path'), 'w')
     assert MIN_BOXES == MAX_BOXES
     num_fixed_boxes = MIN_BOXES
-    split_img_bb = split_feat_file.create_dataset('image_bb', (len(split_img_info), num_fixed_boxes, 4), 'f')
+    # split_img_bb = split_h5_file.create_dataset('image_bb', (len(split_img_info), num_fixed_boxes, 4), 'f')
+    with open(eval('coco_%s_bbox_path'%(split_name)), 'r') as f:
+        split_img_bb = pkl.load(f)
+    split_img_feat = split_h5_file.create_dataset('image_features', (len(split_img_info), num_fixed_boxes, 2048), 'f')
+    split_img_spatial = split_h5_file.create_dataset('spatial_features', (len(split_img_info), num_fixed_boxes, 6), 'f')
 
     print('Total include %d images'%len(split_img_info))
     for idx, img in tqdm(enumerate(split_img_info)):
         im = cv2.imread(img['filename'])
-        blobs, im_scales = _get_blobs(im)
+        boxes = split_img_bb[img['id']]
+        blobs, im_scales = _get_blobs(im, rois=boxes)
         
         # When mapping from image ROIs to feature map ROIs, there's some aliasing (some distinct image ROIs get mapped 
         # to the same feature ROI). Here, we identify duplicate feature ROIs, so we only compute features on the unique subset.
@@ -334,41 +351,40 @@ for split_name in ['train']:
 
         scores = blobs_out['cls_prob']
 
-        # Apply bounding-box regression deltas
-        box_deltas = blobs_out['bbox_pred']
-        pred_boxes = bbox_transform_inv(boxes, box_deltas)
-        pred_boxes = clip_boxes(pred_boxes, im.shape)
+        # # Apply bounding-box regression deltas
+        # box_deltas = blobs_out['bbox_pred']
+        # pred_boxes = bbox_transform_inv(boxes, box_deltas)
+        # pred_boxes = clip_boxes(pred_boxes, im.shape)
 
-        if DEDUP_BOXES > 0 and not cfg.TEST.HAS_RPN:
-            # Map scores and predictions back to the original set of boxes
-            scores = scores[inv_index, :]
-            pred_boxes = pred_boxes[inv_index, :]
+        # if DEDUP_BOXES > 0 and not cfg.TEST.HAS_RPN:
+        #     # Map scores and predictions back to the original set of boxes
+        #     scores = scores[inv_index, :]
+        #     pred_boxes = pred_boxes[inv_index, :]
 
-        cls_boxes = rois[:, 1:5] / im_scales[0]
         pool5 = caffe_net.blobs['pool5_flat'].data
 
-        max_conf = np.zeros((rois.shape[0]))
-        for cls_ind in range(1, scores.shape[1]):
-            cls_scores = scores[:, cls_ind]
-            dets = np.hstack((cls_boxes, cls_scores[:, np.newaxis])).astype(np.float32)
-            keep = np.array(nms(dets, cfg.TEST.NMS))
-            max_conf[keep] = np.where(cls_scores[keep] > max_conf[keep], cls_scores[keep], max_conf[keep])
+        # max_conf = np.zeros((rois.shape[0]))
+        # for cls_ind in range(1, scores.shape[1]):
+        #     cls_scores = scores[:, cls_ind]
+        #     dets = np.hstack((cls_boxes, cls_scores[:, np.newaxis])).astype(np.float32)
+        #     keep = np.array(nms(dets, cfg.TEST.NMS))
+        #     max_conf[keep] = np.where(cls_scores[keep] > max_conf[keep], cls_scores[keep], max_conf[keep])
 
-        keep_boxes = np.where(max_conf >= CONF_THRESH)[0]
-        if len(keep_boxes) < MIN_BOXES:
-            keep_boxes = np.argsort(max_conf)[::-1][:MIN_BOXES]
-        elif len(keep_boxes) > MAX_BOXES:
-            keep_boxes = np.argsort(max_conf)[::-1][:MAX_BOXES]
+        # keep_boxes = np.where(max_conf >= CONF_THRESH)[0]
+        # if len(keep_boxes) < MIN_BOXES:
+        #     keep_boxes = np.argsort(max_conf)[::-1][:MIN_BOXES]
+        # elif len(keep_boxes) > MAX_BOXES:
+        #     keep_boxes = np.argsort(max_conf)[::-1][:MAX_BOXES]
 
-        final_boxes = cls_boxes[keep_boxes]
-
-        final_spatial = boxes_to_spatial(final_boxes, img['width'], img['height'])
-        final_feature = pool5[keep_boxes]
+        final_spatial = boxes_to_spatial(boxes, img['width'], img['height'])
+        final_feature = pool5
 
         split_imgid2idx[img['id']] = idx
-        split_img_bb[idx] = final_boxes
+        # split_img_bb[idx] = final_boxes
+        split_img_feat[idx] = final_feature
+        split_img_spatial[idx] = final_spatial
 
-    split_feat_file.close()    
+    split_h5_file.close()    
     with open(eval(split_name + '_id_path'), 'wb') as f:
         pkl.dump(split_imgid2idx, f)
     print("done!")
