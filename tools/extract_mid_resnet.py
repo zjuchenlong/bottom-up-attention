@@ -9,7 +9,7 @@ from tqdm import tqdm
 import cPickle as pkl
 from fast_rcnn.config import cfg, cfg_from_file
 
-INPUT_SIZE = 600
+INPUT_SIZE = 224
 gpu_id = 1
 # Faster-RCNN Setting
 PIXEL_MEANS = np.array([[[102.9801, 115.9465, 122.7717]]])
@@ -44,7 +44,7 @@ coco_train_img_path = os.path.join(coco_img_path, 'train2014')
 coco_val_img_path = os.path.join(coco_img_path, 'val2014')
 
 # save_path
-coco_mid_save_path = '../data/coco_mid_grid_objs'
+coco_mid_save_path = '../data/coco_mid_grid_objs_224'
 if not os.path.exists(coco_mid_save_path):
     os.makedirs(coco_mid_save_path)
 coco_train_save_id = os.path.join(coco_mid_save_path, 'train_mid_imgid2idx.pkl')
@@ -221,7 +221,8 @@ for split_name in ['train', 'val']:
     split_obj = eval(split_name + '_obj')
     split_save_grid_h5_file = h5py.File(eval('coco_%s_grid_feat'%(split_name)), 'w')
     split_save_objs_h5_file = h5py.File(eval('coco_%s_objs_feat'%(split_name)), 'w')
-    split_save_grid_feat = split_save_grid_h5_file.create_dataset('image_features', (len(split_img_info), 1444, 1024), 'f')
+    split_save_grid_feat = split_save_grid_h5_file.create_dataset('image_features',
+                                                                  (len(split_img_info), 14*14, 1024), 'f')
     split_save_objs_feat = split_save_objs_h5_file.create_dataset('image_features', (len(split_img_info), 36, 1024), 'f')
     split_save_id = {}
     print('Total include %d images'%len(split_img_info))
@@ -283,16 +284,17 @@ for split_name in ['train', 'val']:
         assert box_crop.min() >= 0         
 
         # 600 * 600 -> 38 * 38
-        assert INPUT_SIZE == 600
+        # 224 * 224 -> 14 * 14
+        assert INPUT_SIZE == 224
         box_crop = np.around(box_crop / 16.0).astype(np.int32)
         # position -> mask
-        mask = np.zeros((36, 38, 38))
+        mask = np.zeros((36, 14, 14))
         for i, each_box in enumerate(box_crop):
             mask[i][each_box[1]: each_box[3], each_box[0]: each_box[2]] = 1
-        mask = mask.reshape(36, 38*38)
+        mask = mask.reshape(36, 14*14)
         mask = mask / (mask.sum(1, keepdims=1) + 1e-8)
 
-        each_img_feat = res4b22[0].reshape(1024, 38*38).transpose(1, 0)
+        each_img_feat = res4b22[0].reshape(1024, 14*14).transpose(1, 0)
         box_img_feat = np.matmul(mask, each_img_feat)
 
         split_save_grid_feat[idx] = each_img_feat
